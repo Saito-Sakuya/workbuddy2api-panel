@@ -1357,13 +1357,14 @@ async function loadTaskJobs() {
     $('taskJobsSummary').textContent = jobs.length ? jobs.filter(j => taskJobPresentation(j).active).length + ' 个账号执行中' : '';
     $('taskJobsNote').hidden = !!jobs.length && d.auto_enabled !== false;
     $('taskJobsNote').textContent = d.auto_enabled === false ? '自动成长任务已关闭，可在账号任务中手动启动后台执行。' : '新增国区账号后自动执行，每日按成长任务排程继续推进；可在账号任务中手动启动。';
+    const expanded = new Set(Array.from($('taskJobsList').querySelectorAll('details[open][data-job-id]'), el => el.dataset.jobId));
     $('taskJobsList').innerHTML = jobs.map(job => {
       const info = taskJobPresentation(job);
-      return '<div class="qgroup"><header><span class="nm">' + esc(job.nickname || job.uid.slice(0, 12)) + '</span>' +
+      return '<div class="qgroup task-job"><header><span class="nm">' + esc(job.nickname || job.uid.slice(0, 12)) + '</span>' +
         '<span class="cnt">' + esc(info.trigger + ' · ' + info.label + ' · ' + info.progress) + '</span><span class="grow"></span>' +
         '<button class="xs" data-job-uid="' + esc(job.uid) + '">查看任务</button></header>' +
-        '<div class="state ' + esc(info.severity) + '">' + esc(info.message) + '</div>' +
-        '<details style="padding:0 16px 12px"><summary class="hint">查看结果 · 更新于 ' + esc(ago(job.updated_at)) + '</summary>' + taskJobRows(job) + '</details></div>';
+        '<div class="state job-summary ' + esc(info.severity) + '">' + esc(info.message) + '</div>' +
+        '<details class="job-results" data-job-id="' + esc(job.id) + '"' + (expanded.has(job.id) ? ' open' : '') + '><summary class="hint">查看结果 · 更新于 ' + esc(ago(job.updated_at)) + '</summary>' + taskJobRows(job) + '</details></div>';
     }).join('');
   } catch (e) {
     $('taskJobsNote').hidden = false; $('taskJobsNote').textContent = '后台任务查询失败：' + e.message;
@@ -1757,15 +1758,20 @@ function groupItems(d) {
   return groups;
 }
 const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行', awaiting_progress: '等待计分', claim_pending: '领奖待重试', accepted: '已接受' };
+function taskProgressLabel(value) {
+  const progress = String(value ?? '').trim();
+  return /^\d+(?:\s*\/\s*\d+)?$/.test(progress) ? progress : '—';
+}
 function qrowHTML(it) {
   const isSchool = it.kind === 'school';
   const title = it.title || (isSchool ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code));
   const dotCls = it.status === 'scan' ? 'wait' : it.status === 'running' ? 'run' : it.status === 'error' ? 'err' : it.status === 'skipped' ? 'skip' : it.status === 'done' ? 'done' : 'wait';
   const stWord = it.status === 'scan' ? '待执行' : (ST_WORDS[it.status] || it.status);
+  const progress = taskProgressLabel(it.prog);
   return '<div class="qrow" title="' + esc(it.message || '') + '">' +
     '<span class="code">' + esc(it.code) + '</span>' +
     '<span class="name"><span class="t">' + esc(title) + '</span>' + (isSchool ? '<span class="tag mute">开学季</span>' : '') + '</span>' +
-    '<span class="prog">' + esc(it.prog || '') + '</span>' +
+    '<span class="prog" title="' + esc(progress) + '">' + esc(progress) + '</span>' +
     '<span class="st"><span class="qdot ' + dotCls + '"></span>' + esc(stWord) + '</span>' +
     '<span class="msg">' + esc(it.message || '') + '</span>' +
     '</div>';

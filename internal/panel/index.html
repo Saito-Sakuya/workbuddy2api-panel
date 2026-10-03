@@ -94,16 +94,31 @@ body {
 .qgroup header .nm { font-weight: 600; font-size: 13.5px; }
 .qgroup header .cnt { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .qrow {
-  display: grid; grid-template-columns: 118px 1fr 52px 84px minmax(120px, 240px);
+  display: grid; grid-template-columns: minmax(88px, 118px) minmax(0, 1fr) 72px 96px minmax(100px, 240px);
   gap: 10px; align-items: center; padding: 7.5px 16px; font-size: 13px;
 }
 .qrow:hover { background: var(--surface-2); }
 .qrow .code { font: 11.5px/1.35 var(--mono); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qrow .name { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .qrow .name .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.qrow .prog { font-variant-numeric: tabular-nums; color: var(--ink-2); text-align: right; }
+.qrow .prog { min-width: 0; font-variant-numeric: tabular-nums; color: var(--ink-2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qrow .st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .qrow .msg { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-job > header { align-items: center; flex-wrap: wrap; }
+.task-job > header .nm { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.task-job > header .grow { flex: 1; }
+.task-job > header button { flex: none; }
+.task-job > .job-summary { display: block; padding: 0 16px 10px; line-height: 1.65; overflow-wrap: anywhere; }
+.task-job > .job-results { padding-bottom: 10px; }
+.task-job > .job-results > summary { margin: 0 16px 8px; cursor: pointer; }
+@media (max-width: 640px) {
+  .qrow { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name st" "code prog" "msg msg"; gap: 4px 12px; }
+  .qrow .code { grid-area: code; }
+  .qrow .name { grid-area: name; }
+  .qrow .prog { grid-area: prog; }
+  .qrow .st { grid-area: st; }
+  .qrow .msg { grid-area: msg; white-space: normal; overflow-wrap: anywhere; }
+}
 .qdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .qdot.done { background: var(--ok); }
 .qdot.run { background: var(--accent); animation: qpulse 1.2s ease-in-out infinite; }
