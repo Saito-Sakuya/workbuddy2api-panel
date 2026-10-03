@@ -1234,70 +1234,143 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 // 流程：先把所有未接受的任务批量 accept（规范状态机；上游脚本建议"先 accept"），
 // 再逐项执行行为链路。accept 不是进度产生的必要条件，但让后续状态流转规范。
 func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
+	return p.runAutoAllObserved(context.Background(), a, nil)
+}
+
+type autoTaskRunEvent struct {
+	Kind      string // phase, task_start, result
+	TaskCode  string
+	Result    map[string]any
+	Completed bool // true only for an autoAction result, not batch acceptance
+}
+
+// runAutoAllObserved 对全量任务执行流程提供进度事件。ctx 在每个网络阶段、
+// 自动任务项开始前检查；已有上游调用本身保持原超时语义，取消后不再发起下一项。
+func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe func(autoTaskRunEvent)) []map[string]any {
 	var out []map[string]any
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	emit := func(event autoTaskRunEvent) {
+		if observe != nil {
+			observe(event)
+		}
+	}
 	if a == nil {
 		return []map[string]any{{"task_code": "(全部)", "status": "error", "message": "账号凭证不可用"}}
 	}
 	if a.IsGlobal() {
 		return []map[string]any{{"task_code": "(全部)", "status": "error", "message": globalTaskWriteMessage}}
 	}
+	if ctx.Err() != nil {
+		return out
+	}
 
 	// 阶段 0：批量接受尚未接受的任务（失败不阻塞——行为事件才是进度唯一判据）。
-	if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
-		var codes []string
-		for _, t := range tasks {
-			if !t.Claimed && !taskProgressReached(&t) && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
-				codes = append(codes, t.TaskCode)
+	emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受)"})
+	if ctx.Err() == nil {
+		if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil && ctx.Err() == nil {
+			var codes []string
+			for _, t := range tasks {
+				if !t.Claimed && !taskProgressReached(&t) && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
+					codes = append(codes, t.TaskCode)
+				}
 			}
-		}
-		if len(codes) > 0 {
-			if err := p.cfg.Upstream.AcceptTasks(a, codes); err != nil {
-				out = append(out, map[string]any{
-					"task_code": "(批量接受)", "status": "error",
-					"message": "接受任务失败（不阻塞后续）: " + err.Error(),
-				})
-			} else {
-				out = append(out, map[string]any{
-					"task_code": "(批量接受)", "status": "accepted",
-					"message": fmt.Sprintf("已接受 %d 个任务", len(codes)),
-				})
-				time.Sleep(reportGap)
+			if len(codes) > 0 && ctx.Err() == nil {
+				emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受)"})
+				if ctx.Err() != nil {
+					return out
+				}
+				if err := p.cfg.Upstream.AcceptTasks(a, codes); err != nil {
+					result := map[string]any{
+						"task_code": "(批量接受)", "status": "error",
+						"message": "接受任务失败（不阻塞后续）: " + err.Error(),
+					}
+					out = append(out, result)
+					emit(autoTaskRunEvent{Kind: "result", TaskCode: "(批量接受)", Result: result})
+				} else {
+					result := map[string]any{
+						"task_code": "(批量接受)", "status": "accepted",
+						"message": fmt.Sprintf("已接受 %d 个任务", len(codes)),
+					}
+					out = append(out, result)
+					emit(autoTaskRunEvent{Kind: "result", TaskCode: "(批量接受)", Result: result})
+					waitForContext(ctx, reportGap)
+				}
 			}
 		}
 	}
 
 	// 阶段 0b：小程序口径任务单独接受（默认列表不含 mp 码；失败不阻塞）。
-	if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
-		var mpCodes []string
-		for _, t := range mpTasks {
-			if !t.Claimed && !taskProgressReached(&t) && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
-				mpCodes = append(mpCodes, t.TaskCode)
-			}
-		}
-		if len(mpCodes) > 0 {
-			if err := p.cfg.Upstream.AcceptTasksMP(a, mpCodes); err != nil {
-				out = append(out, map[string]any{
-					"task_code": "(批量接受-mp)", "status": "error",
-					"message": "接受小程序任务失败（不阻塞后续）: " + err.Error(),
-				})
-			} else {
-				out = append(out, map[string]any{
-					"task_code": "(批量接受-mp)", "status": "accepted",
-					"message": fmt.Sprintf("已接受 %d 个小程序任务", len(mpCodes)),
-				})
-				time.Sleep(reportGap)
+	if ctx.Err() == nil {
+		emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受-mp)"})
+		if ctx.Err() == nil {
+			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil && ctx.Err() == nil {
+				var mpCodes []string
+				for _, t := range mpTasks {
+					if !t.Claimed && !taskProgressReached(&t) && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
+						mpCodes = append(mpCodes, t.TaskCode)
+					}
+				}
+				if len(mpCodes) > 0 && ctx.Err() == nil {
+					emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受-mp)"})
+					if ctx.Err() != nil {
+						return out
+					}
+					if err := p.cfg.Upstream.AcceptTasksMP(a, mpCodes); err != nil {
+						result := map[string]any{
+							"task_code": "(批量接受-mp)", "status": "error",
+							"message": "接受小程序任务失败（不阻塞后续）: " + err.Error(),
+						}
+						out = append(out, result)
+						emit(autoTaskRunEvent{Kind: "result", TaskCode: "(批量接受-mp)", Result: result})
+					} else {
+						result := map[string]any{
+							"task_code": "(批量接受-mp)", "status": "accepted",
+							"message": fmt.Sprintf("已接受 %d 个小程序任务", len(mpCodes)),
+						}
+						out = append(out, result)
+						emit(autoTaskRunEvent{Kind: "result", TaskCode: "(批量接受-mp)", Result: result})
+						waitForContext(ctx, reportGap)
+					}
+				}
 			}
 		}
 	}
 
 	for _, act := range autoActions {
+		if ctx.Err() != nil {
+			break
+		}
+		emit(autoTaskRunEvent{Kind: "task_start", TaskCode: act.TaskCode})
+		if ctx.Err() != nil {
+			break
+		}
 		outcome := p.executeAutoTask(a, &act)
-		out = append(out, outcome.resultMap(&act))
+		result := outcome.resultMap(&act)
+		out = append(out, result)
+		emit(autoTaskRunEvent{Kind: "result", TaskCode: act.TaskCode, Result: result, Completed: true})
 		if outcome.ActionRun {
-			time.Sleep(reportGap) // 项间节流
+			if !waitForContext(ctx, reportGap) {
+				break
+			}
 		}
 	}
 	return out
+}
+
+func waitForContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // accountTaskAutoAll 一键完成该账号全部可自动任务。
@@ -1311,26 +1384,10 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, globalTaskWriteMessage)
 		return
 	}
-	// per-account 互斥（与单任务动作共用一把锁）：重复点击 409。
-	if !p.tryLockAccount(uid) {
-		writeErr(w, http.StatusConflict, "该账号有任务动作正在执行中，请等本轮结束后再试")
+	job, started, err := p.StartAccountTaskJob(uid, "manual")
+	if err != nil {
+		writeTaskJobError(w, err)
 		return
 	}
-	// 用 context 兜底超时（多项任务串联 + 每项含真实对话，可能耗时较长）。
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-	defer cancel()
-	done := make(chan []map[string]any, 1)
-	go func() {
-		defer p.unlockAccount(uid) // 流水线真正结束（而非 HTTP 超时返回）才放锁
-		done <- p.runAutoAll(a)
-	}()
-	select {
-	case results := <-done:
-		log.Printf("panel: 一键完成可自动任务 uid=%s 共 %d 项", uid, len(results))
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results})
-	case <-ctx.Done():
-		// HTTP 侧超时返回，但后台流水线仍在跑——锁在流水线 goroutine 内释放，
-		// 期间重复点击会被 409 挡住，不会出现两轮并发。
-		writeErr(w, http.StatusGatewayTimeout, "执行超时（任务仍在后台继续）")
-	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "started": started, "job": job})
 }

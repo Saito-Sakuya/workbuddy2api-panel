@@ -33,7 +33,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.11.12-panel"
+const appVersion = "1.11.13-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -261,17 +261,18 @@ func main() {
 
 	var configSaveMu sync.Mutex
 	pn := panel.New(panel.Config{
-		Pool:        p,
-		Usage:       rec,
-		RequestLog:  requestLog,
-		Upstream:    up,
-		Scheduler:   sch,
-		AuthDir:     cfg.AuthDir,
-		APIKey:      cfg.APIKey,
-		RedisMode:   redisMode,
-		StickyCount: sessCount,
-		Version:     appVersion,
-		Live:        live,
+		Pool:             p,
+		Usage:            rec,
+		RequestLog:       requestLog,
+		Upstream:         up,
+		Scheduler:        sch,
+		AutoTasksEnabled: sch.GrowthEnabled,
+		AuthDir:          cfg.AuthDir,
+		APIKey:           cfg.APIKey,
+		RedisMode:        redisMode,
+		StickyCount:      sessCount,
+		Version:          appVersion,
+		Live:             live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -288,8 +289,7 @@ func main() {
 	if err := pn.Logs().SetTaskArchive(stateSibling(cfg.StateFile, "task-logs.json")); err != nil {
 		log.Printf("WARN: task log archive: %v", err)
 	}
-	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
-	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
+	// 每日将国区账号交给持久化后台任务；账号内互斥，返回不等待上游操作。
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
@@ -317,6 +317,11 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if err := pn.StartTaskJobs(ctx, stateSibling(cfg.StateFile, "task-jobs.json")); err != nil {
+		log.Fatalf("task jobs: %v", err)
+	}
+	defer pn.StopTaskJobs()
+	pn.ResumeTaskJobs()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 

@@ -312,14 +312,25 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	return true, len(items), seq, "", scanAccounts, scanErrorCount
 }
 
-// RunGrowthQueueOnce 调度器 growth 时点回调（sch.SetGrowthHook 挂载）：与
-// 「执行全部待办」按钮完全同管线（成长，串行并发 1）。Sequential 族
-// 每日零点解锁一环，此前只能手动扫描推进；此回调让链条每天自动走一环。
-// 异步执行（startGrowthQueue 启动 goroutine 即返），已在跑/无待办安全跳过。
+// RunGrowthQueueOnce 每日为启用的国区账号启动后台任务。账号内正在执行时
+// 复用现有任务，网络查询与动作均由后台处理，调度器不等待完整扫描。
 func (p *Panel) RunGrowthQueueOnce() {
-	started, total, _, _, _, _ := p.startGrowthQueue(1, true)
-	if started {
-		log.Printf("panel: 定时成长任务队列已启动（%d 项）", total)
+	if p.cfg.AutoTasksEnabled == nil || !p.cfg.AutoTasksEnabled() {
+		return
+	}
+	started := 0
+	for _, st := range p.cfg.Pool.List() {
+		if st.Disabled || st.Realm == "global" {
+			continue
+		}
+		if _, fresh, err := p.StartAccountTaskJob(st.UID, "daily"); err != nil {
+			log.Printf("panel: 定时后台任务 uid=%s: %v", st.UID, err)
+		} else if fresh {
+			started++
+		}
+	}
+	if started > 0 {
+		log.Printf("panel: 定时后台任务已启动（%d 个账号）", started)
 	}
 }
 

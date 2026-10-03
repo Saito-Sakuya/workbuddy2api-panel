@@ -1145,6 +1145,8 @@ start();
 
 /* ── 积分任务 ─────────────────────────────────────────────────────── */
 let taskUID = null, taskCapabilities = { accept: false, claim: false, automate: false };
+let taskJobTimer = null, taskJobPolling = null, taskJobID = null, taskJobGeneration = 0;
+let taskJobsLoading = false;
 
 // 服务端状态与界面反馈共用的纯函数，避免把已提交/失败当成已完成。
 function checkinResultNote(r) {
@@ -1225,19 +1227,32 @@ const AUTO_TASKS = {
 };
 
 function openTasks(uid) {
+  taskJobGeneration++;
+  if (taskJobTimer) clearInterval(taskJobTimer);
+  taskJobTimer = null;
+  taskJobID = null;
   taskUID = uid;
   taskCapabilities = { accept: false, claim: false, automate: false };
   $('btnTaskAcceptAll').hidden = true;
   $('btnTaskAutoAll').hidden = true;
   $('taskNote').hidden = true;
+  $('taskJobView').hidden = true;
+  $('btnTaskAutoAll').disabled = false;
+  $('btnTaskAutoAll').textContent = '后台完成可自动任务';
   $('taskWho').textContent = uid.slice(0, 16);
   $('taskVeil').classList.add('on');
   $('btnTaskReload').hidden = false;
   loadTasks();
+  loadAccountTaskJob(uid);
 }
-function closeTasks() { $('taskVeil').classList.remove('on'); taskUID = null; }
+function closeTasks() {
+  taskJobGeneration++;
+  $('taskVeil').classList.remove('on'); taskUID = null; taskJobID = null;
+  if (taskJobTimer) clearInterval(taskJobTimer);
+  taskJobTimer = null;
+}
 $('btnCloseTask').onclick = closeTasks;
-$('btnTaskReload').onclick = loadTasks;
+$('btnTaskReload').onclick = () => { loadTasks(); if (taskUID) loadAccountTaskJob(taskUID); };
 
 // 全部接受：把该账号未接受的任务一次性报名（幂等，跳过已接受/已领取）。
 $('btnTaskAcceptAll').onclick = async () => {
@@ -1256,20 +1271,109 @@ $('btnTaskAcceptAll').onclick = async () => {
   finally { btn.disabled = false; btn.textContent = '全部接受'; loadTasks(); }
 };
 
-// 一键完成全部可自动任务（耗时较长：含真实对话，逐项回读验证）。
+// 后台执行：请求仅启动任务，页面轮询进度；关闭弹窗不影响服务端执行。
 $('btnTaskAutoAll').onclick = async () => {
   if (!taskUID || !taskCapabilities.automate) return;
+  const uid = taskUID;
   const btn = $('btnTaskAutoAll');
-  if (!confirm('将依次执行：补报对话事件、领取 Buddy、glm-5.2 对话、尝试上报。\n过程约 1-2 分钟（含真实对话），确认继续？')) return;
-  btn.disabled = true; btn.textContent = '执行中…';
+  btn.disabled = true; btn.textContent = '启动中…';
   try {
-    const r = await api('accounts/' + encodeURIComponent(taskUID) + '/tasks/auto_all', { method: 'POST' });
-    const summary = taskResultSummary(r.results);
-    toast(summary.message, summary.severity);
-    console.log('auto_all results:', r.results);
-  } catch (e) { toast(e.message, 'err'); }
-  finally { btn.disabled = false; btn.textContent = '一键完成可自动任务'; loadTasks(); }
+    const r = await api('accounts/' + encodeURIComponent(uid) + '/tasks/auto_all', { method: 'POST' });
+    toast(r.started ? '后台任务已启动，关闭页面后仍会继续执行' : '该账号已有后台任务，已恢复进度显示', 'ok');
+    if (taskUID === uid) { taskJobGeneration++; renderAccountTaskJob(r.job); startAccountTaskJobPolling(uid); }
+    if (view === 'taskscenter') loadTaskJobs();
+  } catch (e) {
+    toast(e.message, 'err');
+    if (taskUID === uid) { btn.disabled = false; btn.textContent = '后台完成可自动任务'; }
+  }
 };
+
+function taskJobPresentation(job) {
+  const active = ['pending', 'running'].includes(job.status);
+  const labels = { pending: '排队中', running: '执行中', finished: '已结束', interrupted: '已中断', error: '执行失败' };
+  const trigger = { new_account: '新增账号', daily: '每日定时', manual: '手动启动', resume: '重启续跑' }[job.trigger] || job.trigger || '';
+  const progress = '处理 ' + (job.completed || 0) + ' / ' + (job.total || 0) + ' 项';
+  const summary = taskResultSummary(job.results || []);
+  const current = active && job.current_task ? '正在处理：' + job.current_task : '';
+  return { active, trigger, progress, label: labels[job.status] || job.status,
+    message: [labels[job.status] || job.status, progress, current, job.error || job.message, summary.message].filter(Boolean).join(' · '),
+    severity: job.status === 'error' || job.status === 'interrupted' ? 'err' : summary.severity };
+}
+
+function taskJobRows(job) {
+  return (job.results || []).map(item => qrowHTML({ code: item.task_code || '', title: item.title,
+    status: taskOutcomeStatus(item), message: item.message || item.claim_error,
+    prog: item.progress_after || item.progress_before || '' })).join('');
+}
+
+function renderAccountTaskJob(job) {
+  $('taskJobView').hidden = !job;
+  if (!job) return;
+  taskJobID = job.id;
+  const info = taskJobPresentation(job);
+  $('taskJobState').className = 'state ' + info.severity;
+  $('taskJobState').textContent = info.message;
+  $('taskJobResults').innerHTML = taskJobRows(job) || '<div class="hint">等待后台任务开始处理</div>';
+  $('btnTaskAutoAll').disabled = info.active;
+  $('btnTaskAutoAll').textContent = info.active ? '后台执行中…' : '后台完成可自动任务';
+}
+
+async function loadAccountTaskJob(uid) {
+  if (taskJobPolling === uid) return;
+  taskJobPolling = uid;
+  const generation = taskJobGeneration;
+  try {
+    const d = await api('accounts/' + encodeURIComponent(uid) + '/tasks/job');
+    if (taskUID !== uid || taskJobGeneration !== generation) return;
+    const previous = taskJobID;
+    renderAccountTaskJob(d.job);
+    if (d.job && taskJobPresentation(d.job).active) startAccountTaskJobPolling(uid);
+    else {
+      if (taskJobTimer) clearInterval(taskJobTimer);
+      taskJobTimer = null;
+      if (previous && d.job && previous === d.job.id) loadTasks();
+    }
+  } catch (e) {
+    if (taskUID === uid && taskJobGeneration === generation) { $('taskJobView').hidden = false; $('taskJobState').className = 'state err'; $('taskJobState').textContent = '后台进度查询失败：' + e.message; }
+  } finally {
+    if (taskJobPolling === uid) taskJobPolling = null;
+    if (taskUID && (taskUID !== uid || taskJobGeneration !== generation) && !taskJobTimer) loadAccountTaskJob(taskUID);
+  }
+}
+
+function startAccountTaskJobPolling(uid) {
+  if (taskJobTimer) clearInterval(taskJobTimer);
+  taskJobTimer = setInterval(() => { if (taskUID === uid) loadAccountTaskJob(uid); }, 3000);
+}
+
+async function loadTaskJobs() {
+  // go() 顶层调用也会进入此函数，首次 await 前不读取后声明的状态。
+  await Promise.resolve();
+  if (taskJobsLoading) return;
+  taskJobsLoading = true;
+  try {
+    const d = await api('tasks/jobs');
+    const jobs = d.jobs || [];
+    $('taskJobsSummary').textContent = jobs.length ? jobs.filter(j => taskJobPresentation(j).active).length + ' 个账号执行中' : '';
+    $('taskJobsNote').hidden = !!jobs.length && d.auto_enabled !== false;
+    $('taskJobsNote').textContent = d.auto_enabled === false ? '自动成长任务已关闭，可在账号任务中手动启动后台执行。' : '新增国区账号后自动执行，每日按成长任务排程继续推进；可在账号任务中手动启动。';
+    $('taskJobsList').innerHTML = jobs.map(job => {
+      const info = taskJobPresentation(job);
+      return '<div class="qgroup"><header><span class="nm">' + esc(job.nickname || job.uid.slice(0, 12)) + '</span>' +
+        '<span class="cnt">' + esc(info.trigger + ' · ' + info.label + ' · ' + info.progress) + '</span><span class="grow"></span>' +
+        '<button class="xs" data-job-uid="' + esc(job.uid) + '">查看任务</button></header>' +
+        '<div class="state ' + esc(info.severity) + '">' + esc(info.message) + '</div>' +
+        '<details style="padding:0 16px 12px"><summary class="hint">查看结果 · 更新于 ' + esc(ago(job.updated_at)) + '</summary>' + taskJobRows(job) + '</details></div>';
+    }).join('');
+  } catch (e) {
+    $('taskJobsNote').hidden = false; $('taskJobsNote').textContent = '后台任务查询失败：' + e.message;
+  } finally { taskJobsLoading = false; }
+}
+$('btnTaskJobsReload').onclick = loadTaskJobs;
+$('taskJobsList').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-job-uid]');
+  if (b) openTasks(b.dataset.jobUid);
+});
 
 async function loadTasks() {
   if (!taskUID) return;
@@ -1652,7 +1756,7 @@ function groupItems(d) {
   }
   return groups;
 }
-const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行', awaiting_progress: '等待计分', claim_pending: '领奖待重试' };
+const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行', awaiting_progress: '等待计分', claim_pending: '领奖待重试', accepted: '已接受' };
 function qrowHTML(it) {
   const isSchool = it.kind === 'school';
   const title = it.title || (isSchool ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code));
@@ -1662,7 +1766,7 @@ function qrowHTML(it) {
     '<span class="code">' + esc(it.code) + '</span>' +
     '<span class="name"><span class="t">' + esc(title) + '</span>' + (isSchool ? '<span class="tag mute">开学季</span>' : '') + '</span>' +
     '<span class="prog">' + esc(it.prog || '') + '</span>' +
-    '<span class="st"><span class="qdot ' + dotCls + '"></span>' + stWord + '</span>' +
+    '<span class="st"><span class="qdot ' + dotCls + '"></span>' + esc(stWord) + '</span>' +
     '<span class="msg">' + esc(it.message || '') + '</span>' +
     '</div>';
 }
@@ -1733,6 +1837,7 @@ function startQueuePolling() {
 // reattachQueueView 切回任务中心视图时恢复队列进度：仅当本页启动的队列仍在
 // 执行才重新开轮询（残留态/别页队列不接管——视图不被旧结果冲掉）。
 function reattachQueueView() {
+  loadTaskJobs();
   // 全程异步：go() 在顶层（app.js ~143 行）被调用时，本文件下方 let/const
   //（queueTimer/lastQueueSeq 等）尚未初始化——同步读取即 TDZ ReferenceError
   // 使整个脚本中断。await 之后才碰它们（旧 pollQueueOnce 正是靠开头的 await
