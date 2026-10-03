@@ -250,7 +250,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot(), "archive_error": p.logs.ArchiveError()})
 }
 
 // requestMetrics 返回进程内请求指标、最近 100 条与归档状态。
@@ -483,6 +483,16 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
+	if a.IsGlobal() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":           true,
+			"realm":        "global",
+			"skipped":      true,
+			"skip_reason":  "国际区账号不适用国内区签到",
+			"checkin_done": false,
+		})
+		return
+	}
 	checkinMsg := ""
 	checkinDone := false
 	if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
@@ -496,9 +506,12 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		p.cfg.Pool.NoteCheckinDone(uid)
 		checkinDone = true
 	}
-	resp := map[string]any{"ok": true, "checkin_done": checkinDone}
+	resp := map[string]any{"ok": checkinDone, "realm": "cn", "checkin_done": checkinDone}
 	if checkinMsg != "" {
 		resp["checkin_message"] = checkinMsg
+		if !checkinDone {
+			resp["checkin_error"] = checkinMsg
+		}
 	}
 	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
 	if err != nil {
@@ -639,11 +652,11 @@ func (p *Panel) syncNicknames() {
 		return
 	}
 	var (
-		mu       sync.Mutex
-		updated  int
-		failed   int
-		sem      = make(chan struct{}, 3)
-		wg       sync.WaitGroup
+		mu      sync.Mutex
+		updated int
+		failed  int
+		sem     = make(chan struct{}, 3)
+		wg      sync.WaitGroup
 	)
 	for _, j := range jobs {
 		wg.Add(1)
